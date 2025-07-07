@@ -1,0 +1,436 @@
+import argparse
+import os
+import base64
+from github import Github
+from github.GithubException import GithubException
+import glob
+from pathlib import Path
+
+# Caminho para armazenar o token
+TOKEN_PATH = os.path.expanduser("~/.mygit_token")
+
+def get_github_client():
+    """Obtém o cliente GitHub autenticado."""
+    if not os.path.exists(TOKEN_PATH):
+        print("❌ Erro: Você precisa fazer login primeiro!")
+        print("💡 Execute: mygit login")
+        print("   Depois digite seu token do GitHub quando solicitado.")
+        exit(1)
+    with open(TOKEN_PATH, 'r') as f:
+        token = f.read().strip()
+    return Github(token)
+
+def login(args):
+    """Faz login salvando o token do GitHub."""
+    print("🔑 Para fazer login, você precisa de um token do GitHub.")
+    print("📝 Como obter um token:")
+    print("   1. Vá para https://github.com/settings/tokens")
+    print("   2. Clique em 'Generate new token (classic)'")
+    print("   3. Selecione as permissões necessárias (repo, user)")
+    print("   4. Copie o token gerado")
+    print()
+    
+    token = input("Digite seu token do GitHub: ").strip()
+    
+    if not token:
+        print("❌ Erro: Token não pode estar vazio!")
+        print("💡 Execute novamente: mygit login")
+        exit(1)
+    
+    try:
+        g = Github(token)
+        user = g.get_user()
+        print(f"✅ Login bem-sucedido como {user.login}")
+        with open(TOKEN_PATH, 'w') as f:
+            f.write(token)
+    except GithubException as e:
+        print(f"❌ Erro ao fazer login: {e}")
+        print("💡 Verifique se:")
+        print("   - O token está correto")
+        print("   - O token tem as permissões necessárias")
+        print("   - Sua conexão com a internet está funcionando")
+        exit(1)
+
+def parse_repo_path(repo_path):
+    """Interpreta o caminho do repositório no formato usuario/repositório:caminho."""
+    if not repo_path:
+        return None, None
+    
+    parts = repo_path.split(':', 1)
+    repo_name = parts[0]
+    repo_path = parts[1] if len(parts) > 1 else ""
+    
+    # Validar formato do repositório
+    if not repo_name or '/' not in repo_name:
+        return None, None
+    
+    return repo_name, repo_path
+
+def send_file(args):
+    """Envia um arquivo local para o repositório."""
+    if not hasattr(args, 'file') or not args.file:
+        print("❌ Erro: Arquivo não especificado!")
+        print("💡 Uso correto: mygit send <arquivo_local> <usuario/repositorio[:caminho]>")
+        print("📝 Exemplo: mygit send meuarquivo.txt usuario/meurepositorio:pasta/arquivo.txt")
+        exit(1)
+    
+    if not hasattr(args, 'repo') or not args.repo:
+        print("❌ Erro: Repositório não especificado!")
+        print("💡 Uso correto: mygit send <arquivo_local> <usuario/repositorio[:caminho]>")
+        print("📝 Exemplo: mygit send meuarquivo.txt usuario/meurepositorio:pasta/arquivo.txt")
+        exit(1)
+    
+    g = get_github_client()
+    file_path, repo_path = args.file, args.repo
+    repo_name, repo_file_path = parse_repo_path(repo_path)
+    
+    if not repo_name:
+        print("❌ Erro: Formato de repositório inválido!")
+        print("💡 Formato esperado: usuario/repositorio[:caminho]")
+        print("📝 Exemplos válidos:")
+        print("   - usuario/meurepositorio")
+        print("   - usuario/meurepositorio:arquivo.txt")
+        print("   - usuario/meurepositorio:pasta/arquivo.txt")
+        exit(1)
+    
+    try:
+        repo = g.get_repo(repo_name)
+    except GithubException as e:
+        print(f"❌ Erro: Repositório '{repo_name}' não encontrado ou inacessível!")
+        print("💡 Verifique se:")
+        print("   - O nome do repositório está correto")
+        print("   - Você tem permissão para acessar o repositório")
+        print("   - O repositório existe")
+        print(f"📝 Formato usado: {repo_name}")
+        print(f"🔍 Erro técnico: {e}")
+        exit(1)
+        
+    if not os.path.isfile(file_path):
+        print(f"❌ Erro: '{file_path}' não é um arquivo válido!")
+        print("💡 Verifique se:")
+        print("   - O caminho do arquivo está correto")
+        print("   - O arquivo existe")
+        print("   - Você tem permissão para ler o arquivo")
+        print("📝 Caminho atual de trabalho:", os.getcwd())
+        exit(1)
+        
+    try:
+        with open(file_path, 'rb') as f:
+            content = f.read()
+        file_name = repo_file_path or os.path.basename(file_path)
+        try:
+            contents = repo.get_contents(file_name)
+            repo.update_file(file_name, f"Update {file_name}", content, contents.sha)
+            print(f"✅ Arquivo {file_name} atualizado no repositório {repo_name}")
+        except GithubException as e:
+            if e.status == 404:
+                repo.create_file(file_name, f"Add {file_name}", content)
+                print(f"✅ Arquivo {file_name} enviado para o repositório {repo_name}")
+            else:
+                print(f"❌ Erro ao enviar arquivo: {e}")
+                print("💡 Possíveis causas:")
+                print("   - Arquivo muito grande (limite do GitHub)")
+                print("   - Sem permissão de escrita no repositório")
+                print("   - Conflito de nome de arquivo")
+                exit(1)
+    except Exception as e:
+        print(f"❌ Erro inesperado ao enviar arquivo: {e}")
+        print("💡 Tente novamente ou verifique sua conexão.")
+        exit(1)
+
+def copy(args):
+    """Copia arquivos de/para o repositório."""
+    if not hasattr(args, 'src') or not args.src:
+        print("❌ Erro: Origem não especificada!")
+        print("💡 Uso correto: mygit copy <origem> <destino>")
+        print("📝 Exemplos:")
+        print("   Upload: mygit copy ./pasta usuario/repo:pasta_remota")
+        print("   Download: mygit copy usuario/repo:arquivo.txt ./local/")
+        exit(1)
+    
+    if not hasattr(args, 'dst') or not args.dst:
+        print("❌ Erro: Destino não especificado!")
+        print("💡 Uso correto: mygit copy <origem> <destino>")
+        print("📝 Exemplos:")
+        print("   Upload: mygit copy ./pasta usuario/repo:pasta_remota")
+        print("   Download: mygit copy usuario/repo:arquivo.txt ./local/")
+        exit(1)
+    
+    g = get_github_client()
+    src, dst = args.src, args.dst
+    
+    if src.startswith('.') or not ':' in src:
+        # Upload: local -> remoto
+        repo_name, repo_path = parse_repo_path(dst)
+        
+        if not repo_name:
+            print("❌ Erro: Formato de repositório de destino inválido!")
+            print("💡 Para upload, o destino deve ser: usuario/repositorio[:caminho]")
+            print("📝 Exemplo: mygit copy ./meuarquivo.txt usuario/meurepositorio:pasta/")
+            exit(1)
+        
+        try:
+            repo = g.get_repo(repo_name)
+        except GithubException as e:
+            print(f"❌ Erro: Repositório '{repo_name}' não encontrado ou inacessível!")
+            print("💡 Verifique se:")
+            print("   - O nome do repositório está correto")
+            print("   - Você tem permissão para acessar o repositório")
+            print(f"🔍 Erro técnico: {e}")
+            exit(1)
+            
+        src_path = Path(src)
+        if not src_path.exists():
+            print(f"❌ Erro: '{src}' não existe!")
+            print("💡 Verifique o caminho do arquivo ou pasta.")
+            print("📝 Caminho atual de trabalho:", os.getcwd())
+            exit(1)
+            
+        if src_path.is_dir():
+            print(f"📁 Enviando pasta '{src}' para '{repo_name}'...")
+            for file_path in src_path.rglob('*'):
+                if file_path.is_file():
+                    rel_path = file_path.relative_to(src_path)
+                    dest_path = os.path.join(repo_path, str(rel_path)).replace('\\', '/')
+                    with open(file_path, 'rb') as f:
+                        content = f.read()
+                    try:
+                        contents = repo.get_contents(dest_path)
+                        repo.update_file(dest_path, f"Update {dest_path}", content, contents.sha)
+                        print(f"✅ Arquivo {dest_path} atualizado em {repo_name}")
+                    except GithubException as e:
+                        if e.status == 404:
+                            repo.create_file(dest_path, f"Add {dest_path}", content)
+                            print(f"✅ Arquivo {dest_path} enviado para {repo_name}")
+                        else:
+                            print(f"❌ Erro ao enviar arquivo {dest_path}: {e}")
+                            exit(1)
+        elif src_path.is_file():
+            dest_path = repo_path or os.path.basename(src)
+            with open(src, 'rb') as f:
+                content = f.read()
+            try:
+                contents = repo.get_contents(dest_path)
+                repo.update_file(dest_path, f"Update {dest_path}", content, contents.sha)
+                print(f"✅ Arquivo {dest_path} atualizado em {repo_name}")
+            except GithubException as e:
+                if e.status == 404:
+                    repo.create_file(dest_path, f"Add {dest_path}", content)
+                    print(f"✅ Arquivo {dest_path} enviado para {repo_name}")
+                else:
+                    print(f"❌ Erro ao enviar arquivo {dest_path}: {e}")
+                    exit(1)
+        else:
+            print(f"❌ Erro: {src} não é um arquivo ou diretório válido.")
+            exit(1)
+    else:
+        # Download: remoto -> local
+        repo_name, repo_path = parse_repo_path(src)
+        
+        if not repo_name:
+            print("❌ Erro: Formato de repositório de origem inválido!")
+            print("💡 Para download, a origem deve ser: usuario/repositorio:caminho")
+            print("📝 Exemplo: mygit copy usuario/meurepositorio:arquivo.txt ./local/")
+            exit(1)
+        
+        try:
+            repo = g.get_repo(repo_name)
+        except GithubException as e:
+            print(f"❌ Erro: Repositório '{repo_name}' não encontrado ou inacessível!")
+            print("💡 Verifique se:")
+            print("   - O nome do repositório está correto")
+            print("   - Você tem permissão para acessar o repositório")
+            print(f"🔍 Erro técnico: {e}")
+            exit(1)
+        try:
+            contents = repo.get_contents(repo_path)
+            if isinstance(contents, list):
+                os.makedirs(dst, exist_ok=True)
+                print(f"📁 Baixando pasta '{repo_path}' para '{dst}'...")
+                for content in contents:
+                    if content.type == 'file':
+                        file_content = base64.b64decode(content.content)
+                        local_path = os.path.join(dst, content.name)
+                        with open(local_path, 'wb') as f:
+                            f.write(file_content)
+                        print(f"✅ Arquivo {content.name} baixado para {local_path}")
+            else:
+                file_content = base64.b64decode(contents.content)
+                local_path = os.path.join(dst, contents.name)
+                os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                with open(local_path, 'wb') as f:
+                    f.write(file_content)
+                print(f"✅ Arquivo {contents.name} baixado para {local_path}")
+        except GithubException as e:
+            print(f"❌ Erro ao baixar de '{repo_path}': {e}")
+            print("💡 Verifique se:")
+            print("   - O caminho do arquivo/pasta está correto")
+            print("   - O arquivo/pasta existe no repositório")
+            print("   - Você tem permissão para acessar o conteúdo")
+            exit(1)
+
+def remove_file(args):
+    """Remove um arquivo do repositório."""
+    if not hasattr(args, 'file') or not args.file:
+        print("❌ Erro: Arquivo não especificado!")
+        print("💡 Uso correto: mygit rm <usuario/repositorio:caminho>")
+        print("📝 Exemplo: mygit rm usuario/meurepositorio:arquivo.txt")
+        exit(1)
+    
+    g = get_github_client()
+    repo_name, repo_path = parse_repo_path(args.file)
+    
+    if not repo_name:
+        print("❌ Erro: Formato de repositório inválido!")
+        print("💡 Formato esperado: usuario/repositorio:caminho")
+        print("📝 Exemplo: mygit rm usuario/meurepositorio:arquivo.txt")
+        exit(1)
+    
+    if not repo_path:
+        print("❌ Erro: Caminho do arquivo não especificado!")
+        print("💡 Você deve especificar qual arquivo remover.")
+        print("📝 Exemplo: mygit rm usuario/meurepositorio:arquivo.txt")
+        exit(1)
+    
+    try:
+        repo = g.get_repo(repo_name)
+        contents = repo.get_contents(repo_path)
+        
+        # Check if contents is a list (directory) or a single ContentFile (file)
+        if isinstance(contents, list):
+            print(f"❌ Erro: '{repo_path}' é um diretório, não um arquivo!")
+            print("💡 Você deve especificar um arquivo específico para remover.")
+            print("📝 Exemplo: mygit rm usuario/meurepositorio:arquivo.txt")
+            exit(1)
+        
+        # If it's a single file, proceed with deletion
+        repo.delete_file(repo_path, f"Remove {repo_path}", contents.sha)
+        print(f"✅ Arquivo {repo_path} removido de {repo_name}")
+    except GithubException as e:
+        if e.status == 404:
+            print(f"❌ Erro: Arquivo '{repo_path}' não encontrado no repositório '{repo_name}'!")
+            print("💡 Verifique se:")
+            print("   - O caminho do arquivo está correto")
+            print("   - O arquivo realmente existe no repositório")
+        else:
+            print(f"❌ Erro ao remover arquivo: {e}")
+            print("💡 Verifique se:")
+            print("   - Você tem permissão para remover arquivos")
+            print("   - O repositório existe e está acessível")
+        exit(1)
+
+def list_files(args):
+    """Lista arquivos no repositório ou repositórios do usuário."""
+    g = get_github_client()
+    
+    repo_arg = args.repo if hasattr(args, 'repo') and args.repo else ":."
+    
+    if repo_arg == ':.':
+        # Lista todos os repositórios do usuário autenticado
+        try:
+            user = g.get_user()
+            repos = user.get_repos()
+            if not repos.totalCount:
+                print("📂 Nenhum repositório encontrado para o usuário.")
+                return
+            print(f"📂 Repositórios do usuário {user.login}:")
+            for repo in repos:
+                print(f"   repo: {repo.full_name}")
+        except GithubException as e:
+            print(f"❌ Erro ao listar repositórios: {e}")
+            print("💡 Verifique sua conexão e permissões.")
+            exit(1)
+    else:
+        # Lista arquivos no repositório especificado
+        repo_name, repo_path = parse_repo_path(repo_arg)
+        
+        if not repo_name:
+            print("❌ Erro: Formato de repositório inválido!")
+            print("💡 Formatos válidos:")
+            print("   - mygit ls :. (lista seus repositórios)")
+            print("   - mygit ls usuario/repositorio (lista raiz do repositório)")
+            print("   - mygit ls usuario/repositorio:pasta (lista pasta específica)")
+            exit(1)
+        
+        try:
+            repo = g.get_repo(repo_name)
+            contents = repo.get_contents(repo_path)
+            print(f"📂 Conteúdo de '{repo_name}:{repo_path or '/'}':")
+            if isinstance(contents, list):
+                for content in contents:
+                    icon = "📁" if content.type == 'dir' else "📄"
+                    print(f"   {icon} {content.type}: {content.path}")
+            else:
+                icon = "📁" if contents.type == 'dir' else "📄"
+                print(f"   {icon} {contents.type}: {contents.path}")
+        except GithubException as e:
+            if e.status == 404:
+                print(f"❌ Erro: Repositório '{repo_name}' ou caminho '{repo_path}' não encontrado!")
+                print("💡 Verifique se:")
+                print("   - O nome do repositório está correto")
+                print("   - O caminho existe no repositório")
+                print("   - Você tem permissão para acessar o repositório")
+            else:
+                print(f"❌ Erro ao listar arquivos: {e}")
+                print("💡 Verifique sua conexão e permissões.")
+            exit(1)
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="🐙 CLI para gerenciar repositórios GitHub de forma simples",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Exemplos de uso:
+  mygit login                                    # Fazer login no GitHub
+  mygit ls :.                                    # Listar seus repositórios
+  mygit ls usuario/repo                          # Listar arquivos na raiz do repositório
+  mygit ls usuario/repo:pasta                    # Listar arquivos em uma pasta
+  mygit send arquivo.txt usuario/repo            # Enviar arquivo para a raiz
+  mygit send arquivo.txt usuario/repo:pasta/     # Enviar arquivo para uma pasta
+  mygit copy ./pasta usuario/repo:pasta_remota   # Enviar pasta completa
+  mygit copy usuario/repo:arquivo.txt ./local/   # Baixar arquivo
+  mygit rm usuario/repo:arquivo.txt              # Remover arquivo
+
+Formato de repositório: usuario/repositorio[:caminho]
+        """
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Comandos disponíveis")
+
+    # Login
+    login_parser = subparsers.add_parser("login", help="Faz login no GitHub")
+    login_parser.set_defaults(func=login)
+
+    # Send
+    send_parser = subparsers.add_parser("send", help="Envia um arquivo para o repositório")
+    send_parser.add_argument("file", help="Caminho do arquivo local")
+    send_parser.add_argument("repo", help="Repositório no formato usuario/repositorio[:caminho]")
+    send_parser.set_defaults(func=send_file)
+
+    # Copy
+    copy_parser = subparsers.add_parser("copy", help="Copia arquivos de/para o repositório")
+    copy_parser.add_argument("src", help="Origem (local ou usuario/repositorio:caminho)")
+    copy_parser.add_argument("dst", help="Destino (local ou usuario/repositorio:caminho)")
+    copy_parser.set_defaults(func=copy)
+
+    # Remove
+    rm_parser = subparsers.add_parser("rm", help="Remove um arquivo do repositório")
+    rm_parser.add_argument("file", help="Arquivo no formato usuario/repositorio:caminho")
+    rm_parser.set_defaults(func=remove_file)
+
+    # List
+    ls_parser = subparsers.add_parser("ls", help="Lista arquivos no repositório")
+    ls_parser.add_argument("repo", help="Repositório no formato usuario/repositorio[:caminho]", nargs="?", default=":.")
+    ls_parser.set_defaults(func=list_files)
+
+    args = parser.parse_args()
+
+    if hasattr(args, 'func'):
+        args.func(args)
+    else:
+        print("❌ Nenhum comando especificado!")
+        print("💡 Comandos disponíveis: login, send, copy, rm, ls")
+        print("📝 Use 'mygit --help' para ver todos os comandos e exemplos.")
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
